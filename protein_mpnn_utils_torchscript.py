@@ -12,6 +12,24 @@ import torch.nn.functional as F
 import random
 import itertools
 from typing import Optional, Tuple, List, Dict, Union, Any
+import logging
+
+# Set up logging
+logger = logging.getLogger('protein_mpnn')
+logger.setLevel(logging.DEBUG)
+# Create console handler with a higher log level
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+# Create file handler which logs even debug messages
+fh = logging.FileHandler('torchscript_output.log')
+fh.setLevel(logging.DEBUG)
+# Create formatters and add them to the handlers
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+ch.setFormatter(formatter)
+fh.setFormatter(formatter)
+# Add the handlers to the logger
+logger.addHandler(ch)
+logger.addHandler(fh)
 
 # A number of functions/classes are adopted from:
 # https://github.com/jingraham/neurips19-graph-protein-design
@@ -237,7 +255,7 @@ def tied_featurize(
     letter_list_list              = []
     visible_list_list             = []
     masked_list_list              = []
-    masked_chain_length_list_list = []
+    masked_chain_length_list_list   = []
     tied_pos_list_of_lists_list   = []
 
     # Loop over batch items
@@ -1410,23 +1428,31 @@ class ProteinMPNN(nn.Module):
         Graph-conditioned sequence generation.
         """
         device = X.device
+        logger.debug(f"Forward pass - Input shapes: X={X.shape}, S={S.shape}, mask={mask.shape}")
 
         # 1) Build edge & index
+        logger.debug("Building edges and indices")
         h_E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
-        # shape: [B, L, K, edge_features]
+        logger.debug(f"Edge features shape: {h_E.shape}, Edge indices shape: {E_idx.shape}")
+        
         # project edges
         h_E = self.W_e(h_E)
         # Start node embeddings as zeros (B, L, hidden_dim)
         B, L, K = E_idx.shape
         h_V = torch.zeros((B, L, self.node_features), device=device)
+        logger.debug(f"Initial node embeddings shape: {h_V.shape}")
 
         # 2) Encoder
+        logger.debug("Starting encoder pass")
         # Unmasked attention over the entire sequence
         mask_attend = gather_nodes(mask.unsqueeze(-1), E_idx).squeeze(-1)
         mask_attend = mask.unsqueeze(-1) * mask_attend
-        for layer in self.encoder_layers:
+        for i, layer in enumerate(self.encoder_layers):
+            logger.debug(f"Encoder layer {i+1}/{len(self.encoder_layers)}")
             h_V, h_E = layer(h_V, h_E, E_idx, mask, mask_attend)
 
+        # 3) Build decoder "input" edges
+        logger.debug("Building decoder input edges")
         # 3) Build decoder "input" edges:
         #    combine sequence embeddings (S) with h_E
         h_S = self.W_s(S)                     # [B, L, hidden_dim]
@@ -1435,34 +1461,40 @@ class ProteinMPNN(nn.Module):
         # 4) Build an "encoder embedding" for the decoder
         #    some code may do cat_neighbors_nodes(...) with h_V
         #    This demonstration is simplified. You might refine it further.
+        logger.debug(f"Sequence embedding shape: {h_S.shape}")
 
-        # For demonstration: we do a random decoding order
+        # 4) Build decoder mask
         chain_M = chain_M * mask
         if (not use_input_decoding_order) or (decoding_order is None):
+            logger.debug("Generating decoding order")
             decoding_order = torch.argsort((chain_M+0.0001)*torch.abs(randn))
         mask_size = L
-        # Build the "permutation_matrix_reverse"
+
+        # Build permutation matrix
+        logger.debug("Building permutation matrix")
         permutation_matrix_reverse = F.one_hot(decoding_order, num_classes=mask_size).float()
-        # [B, L, L]; building an upper-triangular broadcast
         big_upper = 1 - torch.triu(torch.ones(mask_size, mask_size, device=device))
         order_mask_backward = torch.einsum(
             'ij,biq,bjp->bqp',
             big_upper, permutation_matrix_reverse, permutation_matrix_reverse
         )
-        # gather relevant
         mask_attend = torch.gather(order_mask_backward, 2, E_idx)
         mask_1D = mask.unsqueeze(-1)
         mask_bw = mask_1D * mask_attend
         mask_fw = mask_1D * (1. - mask_attend)
 
         # 5) Decoder pass
-        # Starting from the encoded edges h_E, each layer decodes
+        logger.debug("Starting decoder pass")
         for l, layer in enumerate(self.decoder_layers):
+            logger.debug(f"Decoder layer {l+1}/{len(self.decoder_layers)}")
             h_V = layer(h_V, h_E, E_idx, mask, mask_bw)
 
         # 6) Output classifier
+        logger.debug("Computing output logits")
         logits = self.W_out(h_V)
         log_probs = F.log_softmax(logits, dim=-1)
+        logger.debug(f"Output log_probs shape: {log_probs.shape}")
+        
         return log_probs
 
     def sample(
@@ -1496,51 +1528,68 @@ class ProteinMPNN(nn.Module):
         """
         device = X.device
         B, L = chain_mask.shape
+        logger.debug(f"Sample method - Input shapes: X={X.shape}, chain_mask={chain_mask.shape}")
+        logger.debug(f"Sampling with temperature={temperature}")
 
         # If no mask is specified, assume everything is valid
         if mask is None:
+            logger.debug("No mask provided, creating default mask")
             mask = torch.ones_like(chain_mask, dtype=torch.float32, device=device)
+        else:
+            logger.debug(f"Using provided mask with shape {mask.shape}")
 
         # 1) Build edges from X
+        logger.debug("Building edges from coordinates")
         h_E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
+        logger.debug(f"Edge features shape: {h_E.shape}, Edge indices shape: {E_idx.shape}")
         h_E = self.W_e(h_E)   # project edges to hidden_dim
 
         # 2) (Optional) run encoder pass (unmasked)
+        logger.debug("Starting encoder pass")
         B, N, K = E_idx.shape
         h_V = torch.zeros((B, N, self.node_features), device=device)
+        logger.debug(f"Initial node embeddings shape: {h_V.shape}")
 
-        mask_attend = gather_nodes(mask.unsqueeze(-1), E_idx).squeeze(-1)  # [B, N, K]
+        mask_attend = gather_nodes(mask.unsqueeze(-1), E_idx).squeeze(-1)
         mask_attend = mask.unsqueeze(-1) * mask_attend
-        for layer in self.encoder_layers:
-            h_V, h_E = layer(h_V, h_E, E_idx, mask, mask_attend)
+        for i, enc_layer in enumerate(self.encoder_layers):
+            logger.debug(f"Encoder layer {i+1}/{len(self.encoder_layers)}")
+            h_V, h_E = enc_layer(h_V, h_E, E_idx, mask, mask_attend)
 
         # 3) Decide decode order by random * chain_mask
+        logger.debug("Determining decoding order")
         chain_mask = chain_mask * mask  # ensure we only sample where mask=1
         decoding_order = torch.argsort(randn * chain_mask, dim=-1, descending=True)
+        logger.debug(f"Decoding order shape: {decoding_order.shape}")
 
         # Initialize final sample
         S_sample = S_true.clone()
+        logger.debug("Initialized sample sequence")
 
-        # We'll store final distribution in [B, L, 21]:
-        # This means: for each batch item, for each residue, the final probability distribution
+        # We'll store final distribution in [B, L, 21]
         probs_final = torch.zeros((B, L, self.num_letters), device=device)
+        logger.debug(f"Created probability storage tensor with shape {probs_final.shape}")
 
         # 4) Simple step-by-step decode:
+        logger.debug("Starting step-by-step decoding")
         for step in range(L):
             idx_t = decoding_order[:, step]  # [B]
-
+            
             # Possibly skip positions where chain_mask=0
             chain_mask_gathered = torch.gather(chain_mask, 1, idx_t.unsqueeze(-1)).squeeze(-1)
             if torch.all(chain_mask_gathered == 0):
+                logger.debug(f"Skipping step {step} - all positions masked")
                 continue
 
+            logger.debug(f"Decoding step {step+1}/{L}")
             # For demonstration: a full decoder pass each step
-            for dec_layer in self.decoder_layers:
+            for l, dec_layer in enumerate(self.decoder_layers):
+                logger.debug(f"Decoder layer {l+1}/{len(self.decoder_layers)}")
                 h_V = dec_layer(h_V, h_E, E_idx, mask, mask_attend)
 
             # Compute logits here
             logits = self.W_out(h_V)  # [B, L, vocab_size=21]
-
+            
             # gather the relevant positions => shape [B,1,21]
             logits_t = torch.gather(
                 logits,
@@ -1550,9 +1599,9 @@ class ProteinMPNN(nn.Module):
 
             # compute final distribution, store
             probs_t = F.softmax(logits_t / temperature, dim=-1)  # [B,1,21]
+            logger.debug(f"Step {step+1} probabilities shape: {probs_t.shape}")
 
-            # assign these probabilities into the final array:
-            # for each example i in batch, place them at the correct position idx_t[i]
+            # assign these probabilities into the final array
             for i in range(B):
                 pos = idx_t[i].item()
                 probs_final[i, pos, :] = probs_t[i, 0, :]
@@ -1564,11 +1613,13 @@ class ProteinMPNN(nn.Module):
             S_sample.scatter_(1, idx_t.unsqueeze(-1), S_t.unsqueeze(-1))
 
         # 5) Return dictionary with final S, distribution, decoding order
+        logger.debug("Sampling complete")
         sample_dict = {
             "S": S_sample,                # [B, L]
             "probs": probs_final,         # [B, L, 21], so not None
             "decoding_order": decoding_order
         }
+        logger.debug(f"Final sampled sequence shape: {S_sample.shape}")
         return sample_dict
 
 
@@ -1587,69 +1638,54 @@ class ProteinMPNN(nn.Module):
         """
         device = X.device
         B, L = S.shape
+        logger.debug(f"Conditional probs - Input shapes: X={X.shape}, S={S.shape}, mask={mask.shape}")
 
         # ---- 1) Build edges & run ENCODER unmasked ----
-        # (We do a normal encoder pass over all residues.)
+        logger.debug("Building edges and running encoder")
         h_E, E_idx = self.features(X, mask, residue_idx, chain_encoding_all)
+        logger.debug(f"Edge features shape: {h_E.shape}, Edge indices shape: {E_idx.shape}")
         h_E = self.W_e(h_E)  # project to hidden_dim
+        
         # Node embeddings start as zeros
         h_V = torch.zeros((B, L, self.node_features), device=device)
+        logger.debug(f"Initial node embeddings shape: {h_V.shape}")
 
         # Full unmasked self-attention
-        mask_attend = gather_nodes(mask.unsqueeze(-1), E_idx).squeeze(-1)  # [B, L, K]
+        mask_attend = gather_nodes(mask.unsqueeze(-1), E_idx).squeeze(-1)
         mask_attend = mask.unsqueeze(-1) * mask_attend
-        for enc_layer in self.encoder_layers:
+        for i, enc_layer in enumerate(self.encoder_layers):
+            logger.debug(f"Encoder layer {i+1}/{len(self.encoder_layers)}")
             h_V, h_E = enc_layer(h_V, h_E, E_idx, mask, mask_attend)
 
         # ---- 2) Prepare to store the log-probs for each position ----
         vocab_size = self.W_out.out_features  # e.g. 21 or 22 for your alphabet
         log_conditional_probs = torch.zeros((B, L, vocab_size), device=device)
+        logger.debug(f"Created log probabilities tensor with shape {log_conditional_probs.shape}")
 
         # We only need to compute conditional probabilities for positions where chain_M=1
-        # Make sure we do NOT exceed the mask.  So we do chain_M = chain_M * mask
         chain_M = chain_M * mask
-        # Identify which (batch, residue) pairs we need
-        # shape: [N, 2], each row is (b,i)
         b_i_pairs = torch.nonzero(chain_M, as_tuple=False)
+        logger.debug(f"Found {len(b_i_pairs)} positions to compute conditional probabilities for")
 
         # ---- 3) For each (b, i) in those pairs, do a *small* decode step ----
-        #     or at least produce the logits at position i.
-        #
-        #  The code below is very "bare-bones."  In practice you might:
-        #    a) build a partial mask so that residue i "attends" only to other positions, 
-        #    b) run a single-step "decoder" or a short pass that sets all but i as fixed, 
-        #    c) extract the log-probs for residue i.
-        #
-        #  Here we show a minimal version:  we *reuse the final h_V from the encoder*, 
-        #  push it through the decoder layers ignoring the single-position logic, 
-        #  and then read off the log-probs for position i.  You can refine to replicate
-        #  exact "masked self-attention" if needed.
-
-        for (b_idx, i_idx) in b_i_pairs:
-            # b_idx and i_idx are single-item Tensors
+        logger.debug("Starting conditional probability computation for each position")
+        for idx, (b_idx, i_idx) in enumerate(b_i_pairs):
             b_idx = b_idx.item()
             i_idx = i_idx.item()
+            logger.debug(f"Computing for batch {b_idx}, position {i_idx} ({idx+1}/{len(b_i_pairs)})")
 
-            # Option A: Full re-run the decoder for this single position i 
-            #           (like a single-step autoregressive). 
-            # Option B: Minimal approach: just run your decoder with a partial or full mask 
-            #           and pick out position i's distribution.
-
-            # For simplicity, let's do a "global" decode pass on the entire batch item b_idx 
-            # (not recommended for efficiency if L is large).
-            # 1) Slice out just the single example (b_idx).
+            # Slice out just the single example (b_idx)
             h_V_b = h_V[b_idx:b_idx+1].clone()     # shape [1, L, hidden_dim]
             h_E_b = h_E[b_idx:b_idx+1]            # shape [1, L, K, hidden_dim]
             E_idx_b = E_idx[b_idx:b_idx+1]        # shape [1, L, K]
             mask_b = mask[b_idx:b_idx+1]          # shape [1, L]
 
-            # 2) Run the decoder layers
-            #    (In your older code, you might do masked self-attention so that only i sees the rest,
-            #     but for minimal demonstration we just do a single "no-op" or basic pass.)
-            for dec_layer in self.decoder_layers:
-                h_V_b = dec_layer(h_V_b, h_E_b, E_idx_b, mask_b)  # shape [1, L, hidden_dim]
+            # Run the decoder layers
+            for l, dec_layer in enumerate(self.decoder_layers):
+                logger.debug(f"Decoder layer {l+1}/{len(self.decoder_layers)}")
+                h_V_b = dec_layer(h_V_b, h_E_b, E_idx_b, mask_b)
 
-            # 3) Get logits and log_probs
+            # Get logits and log_probs
             logits_b = self.W_out(h_V_b)  # [1, L, vocab_size]
             log_probs_b = F.log_softmax(logits_b, dim=-1)
             # store for position i_idx
@@ -1657,4 +1693,5 @@ class ProteinMPNN(nn.Module):
 
             # Done for (b_idx, i_idx)
 
+        logger.debug("Completed conditional probability computation")
         return log_conditional_probs
