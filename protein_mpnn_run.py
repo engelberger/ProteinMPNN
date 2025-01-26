@@ -18,8 +18,8 @@ def main(args):
     import os.path
     import subprocess
     
-    from protein_mpnn_utils import loss_nll, loss_smoothed, gather_edges, gather_nodes, gather_nodes_t, cat_neighbors_nodes, _scores, _S_to_seq, tied_featurize, parse_PDB, parse_fasta
-    from protein_mpnn_utils import StructureDataset, StructureDatasetPDB, ProteinMPNN
+    from protein_mpnn_utils_torchscript_new import loss_nll, loss_smoothed, gather_edges, gather_nodes, gather_nodes_t, cat_neighbors_nodes, _scores, _S_to_seq, tied_featurize, parse_PDB, parse_fasta
+    from protein_mpnn_utils_torchscript_new import StructureDataset, StructureDatasetPDB, ProteinMPNN
 
     if args.seed:
         seed=args.seed
@@ -177,7 +177,18 @@ def main(args):
 
     checkpoint = torch.load(checkpoint_path, map_location=device) 
     noise_level_print = checkpoint['noise_level']
-    model = ProteinMPNN(ca_only=args.ca_only, num_letters=21, node_features=hidden_dim, edge_features=hidden_dim, hidden_dim=hidden_dim, num_encoder_layers=num_layers, num_decoder_layers=num_layers, augment_eps=args.backbone_noise, k_neighbors=checkpoint['num_edges'])
+    model = ProteinMPNN(
+        ca_only=args.ca_only,
+        num_letters=21,
+        node_features=hidden_dim,
+        edge_features=hidden_dim,
+        hidden_dim=hidden_dim,
+        num_encoder_layers=num_layers,
+        num_decoder_layers=num_layers,
+        augment_eps=args.backbone_noise,
+        k_neighbors=checkpoint['num_edges'],
+        dropout=0.0
+    )
     model.to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
