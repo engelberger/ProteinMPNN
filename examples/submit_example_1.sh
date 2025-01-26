@@ -23,4 +23,5 @@ python protein_mpnn_run.py \
         --num_seq_per_target 2 \
         --sampling_temp "0.1" \
         --seed 37 \
-        --batch_size 1
+        --batch_size 1 \
+        --use_torchscript

@@ -1,5 +1,28 @@
 import argparse
 import os.path
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('protein_mpnn.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('protein_mpnn')
+
+def get_utils_module(use_torchscript=False):
+    if use_torchscript:
+        logger.info("Using TorchScript implementation")
+        from protein_mpnn_utils_torchscript import loss_nll, loss_smoothed, gather_edges, gather_nodes, gather_nodes_t, cat_neighbors_nodes, _scores, _S_to_seq, tied_featurize, parse_PDB, parse_fasta
+        from protein_mpnn_utils_torchscript import StructureDataset, StructureDatasetPDB, ProteinMPNN
+    else:
+        logger.info("Using standard implementation")
+        from protein_mpnn_utils import loss_nll, loss_smoothed, gather_edges, gather_nodes, gather_nodes_t, cat_neighbors_nodes, _scores, _S_to_seq, tied_featurize, parse_PDB, parse_fasta
+        from protein_mpnn_utils import StructureDataset, StructureDatasetPDB, ProteinMPNN
+    return loss_nll, loss_smoothed, gather_edges, gather_nodes, gather_nodes_t, cat_neighbors_nodes, _scores, _S_to_seq, tied_featurize, parse_PDB, parse_fasta, StructureDataset, StructureDatasetPDB, ProteinMPNN
 
 def main(args):
 
@@ -18,13 +41,16 @@ def main(args):
     import os.path
     import subprocess
     
-    from protein_mpnn_utils_torchscript_new import loss_nll, loss_smoothed, gather_edges, gather_nodes, gather_nodes_t, cat_neighbors_nodes, _scores, _S_to_seq, tied_featurize, parse_PDB, parse_fasta
-    from protein_mpnn_utils_torchscript_new import StructureDataset, StructureDatasetPDB, ProteinMPNN
+    logger.info("Starting main function with args: %s", args)
+    
+    # Import the correct module based on args
+    loss_nll, loss_smoothed, gather_edges, gather_nodes, gather_nodes_t, cat_neighbors_nodes, _scores, _S_to_seq, tied_featurize, parse_PDB, parse_fasta, StructureDataset, StructureDatasetPDB, ProteinMPNN = get_utils_module(args.use_torchscript)
 
     if args.seed:
         seed=args.seed
     else:
         seed=int(np.random.randint(0, high=999, size=1, dtype=int)[0])
+    logger.info("Using seed: %d", seed)
 
     torch.manual_seed(seed)
     random.seed(seed)
@@ -33,6 +59,7 @@ def main(args):
     hidden_dim = 128
     num_layers = 3 
   
+    logger.info("Model configuration - hidden_dim: %d, num_layers: %d", hidden_dim, num_layers)
 
     if args.path_to_model_weights:
         model_folder_path = args.path_to_model_weights
@@ -42,17 +69,19 @@ def main(args):
         file_path = os.path.realpath(__file__)
         k = file_path.rfind("/")
         if args.ca_only:
-            print("Using CA-ProteinMPNN!")
+            logger.info("Using CA-ProteinMPNN!")
             model_folder_path = file_path[:k] + '/ca_model_weights/'
             if args.use_soluble_model:
-                print("WARNING: CA-SolubleMPNN is not available yet")
+                logger.warning("CA-SolubleMPNN is not available yet")
                 sys.exit()
         else:
             if args.use_soluble_model:
-                print("Using ProteinMPNN trained on soluble proteins only!")
+                logger.info("Using ProteinMPNN trained on soluble proteins only!")
                 model_folder_path = file_path[:k] + '/soluble_model_weights/'
             else:
                 model_folder_path = file_path[:k] + '/vanilla_model_weights/'
+    
+    logger.info("Using model weights from: %s", model_folder_path)
 
     checkpoint_path = model_folder_path + f'{args.model_name}.pt'
     folder_for_outputs = args.out_folder
@@ -238,6 +267,8 @@ def main(args):
     with torch.no_grad():
         test_sum, test_weights = 0., 0.
         for ix, protein in enumerate(dataset_valid):
+            logger.info("Processing protein %d: %s", ix, protein['name'])
+            
             score_list = []
             global_score_list = []
             all_probs_list = []
@@ -426,6 +457,8 @@ def main(args):
                 if print_all:
                     print(f'{num_seqs} sequences of length {total_length} generated in {dt} seconds')
    
+    logger.info("Sequence generation completed")
+
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
@@ -475,6 +508,8 @@ if __name__ == "__main__":
     argparser.add_argument("--pssm_bias_flag", type=int, default=0, help="0 for False, 1 for True")
     
     argparser.add_argument("--tied_positions_jsonl", type=str, default='', help="Path to a dictionary with tied positions")
+    
+    argparser.add_argument("--use_torchscript", action="store_true", default=False, help="Use torchscript version of utils")
     
     args = argparser.parse_args()    
     main(args)   
