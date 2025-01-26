@@ -15,13 +15,15 @@ from typing import Optional, Tuple, List, Dict, Union, Any
 import logging
 
 # Set up logging
-logger = logging.getLogger('protein_mpnn')
+logger = logging.getLogger('protein_mpnn_torchscript')
 logger.setLevel(logging.DEBUG)
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
 # Create console handler with a higher log level
 ch = logging.StreamHandler()
 ch.setLevel(logging.INFO)
 # Create file handler which logs even debug messages
-fh = logging.FileHandler('torchscript_output.log')
+fh = logging.FileHandler('logs/torchscript_output.log')
 fh.setLevel(logging.DEBUG)
 # Create formatters and add them to the handlers
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
